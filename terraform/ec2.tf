@@ -1,5 +1,5 @@
 resource "aws_instance" "app_server" {
-  ami           = ""
+  ami           = "ami-051a31ab2f4d498f5"
   instance_type = "t2.micro"
 
   security_groups = [aws_security_group.app_sg.name]
