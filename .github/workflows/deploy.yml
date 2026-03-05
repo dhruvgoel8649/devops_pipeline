@@ -9,101 +9,68 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   BACKEND_REPO: ${{ secrets.ECR_BACKEND_REPO }}
   FRONTEND_REPO: ${{ secrets.ECR_FRONTEND_REPO }}
+  IMAGE_TAG: ${{ github.sha }} # Define globally so all steps see it
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-    # 1️⃣ Checkout Code
-    - name: Checkout Repository
-      uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
 
-    # 2️⃣ Configure AWS Credentials
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v2
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Build and Push Backend
+        run: |
+          docker build -t $BACKEND_REPO:$IMAGE_TAG ./backend
+          docker push $BACKEND_REPO:$IMAGE_TAG
 
+      - name: Build and Push Frontend
+        run: |
+          docker build -t $FRONTEND_REPO:$IMAGE_TAG ./frontend
+          docker push $FRONTEND_REPO:$IMAGE_TAG
 
-    # 3️⃣ Login to Amazon ECR
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
+      - name: Terraform Init & Apply
+        working-directory: ./terraform
+        run: |
+          terraform init
+          terraform apply -auto-approve
 
-    # 4️⃣ Build & Push Backend Image
-    - name: Build and Push Backend
-      run: |
-        IMAGE_TAG=${{ github.sha }}
-        docker build -t backend:$IMAGE_TAG ./backend
-        docker tag backend:$IMAGE_TAG $BACKEND_REPO:$IMAGE_TAG
-        docker push $BACKEND_REPO:$IMAGE_TAG
+      - name: Get EC2 Public IP
+        id: terraform_output
+        working-directory: ./terraform
+        run: |
+          # Use GITHUB_OUTPUT for modern best practices
+          echo "ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
 
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ steps.terraform_output.outputs.ip }}
+          username: ec2-user # or 'ubuntu' depending on your AMI
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: IMAGE_TAG,BACKEND_REPO,FRONTEND_REPO,AWS_REGION
+          script: |
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $BACKEND_REPO
+            
+            docker pull $BACKEND_REPO:$IMAGE_TAG
+            docker pull $FRONTEND_REPO:$IMAGE_TAG
 
-    # 5️⃣ Build & Push Frontend Image
-    - name: Build and Push Frontend
-      run: |
-        IMAGE_TAG=${{ github.sha }}
-        docker build -t frontend:$IMAGE_TAG ./frontend
-        docker tag frontend:$IMAGE_TAG $FRONTEND_REPO:$IMAGE_TAG
-        docker push $FRONTEND_REPO:$IMAGE_TAG
+            docker stop backend frontend || true
+            docker rm backend frontend || true
 
-
-    # 6️⃣ Setup Terraform
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-
-
-    # 7️⃣ Terraform Init
-    - name: Terraform Init
-      working-directory: ./terraform
-      run: terraform init
-
-
-    # 8️⃣ Terraform Plan
-    - name: Terraform Plan
-      working-directory: ./terraform
-      run: terraform plan
-
-
-    # 9️⃣ Terraform Apply
-    - name: Terraform Apply
-      working-directory: ./terraform
-      run: terraform apply -auto-approve
-
-
-    # 🔟 Get EC2 Public IP from Terraform Output
-    - name: Get EC2 Public IP
-      id: terraform_output
-      working-directory: ./terraform
-      run: |
-        echo "EC2_PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
-
-
-    # 1️⃣1️⃣ Deploy to EC2
-    - name: Deploy Application on EC2
-      run: |
-        IMAGE_TAG=${{ github.sha }}
-
-        echo "${{ secrets.EC2_SSH_KEY }}" > private_key.pem
-        chmod 600 private_key.pem
-
-        ssh -o StrictHostKeyChecking=no -i private_key.pem ec2-user@$EC2_PUBLIC_IP << EOF
-          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $BACKEND_REPO
-          
-          docker pull $BACKEND_REPO:$IMAGE_TAG
-          docker pull $FRONTEND_REPO:$IMAGE_TAG
-
-          docker stop backend || true
-          docker stop frontend || true
-          docker rm backend || true
-          docker rm frontend || true
-
-          docker run -d --name backend -p 8000:8000 $BACKEND_REPO:$IMAGE_TAG
-          docker run -d --name frontend -p 80:80 $FRONTEND_REPO:$IMAGE_TAG
-        EOF
+            docker run -d --name backend -p 8000:8000 $BACKEND_REPO:$IMAGE_TAG
+            docker run -d --name frontend -p 80:80 $FRONTEND_REPO:$IMAGE_TAG
