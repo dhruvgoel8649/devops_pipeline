@@ -9,12 +9,11 @@ env:
   AWS_REGION: ${{ secrets.AWS_REGION }}
   BACKEND_REPO: ${{ secrets.ECR_BACKEND_REPO }}
   FRONTEND_REPO: ${{ secrets.ECR_FRONTEND_REPO }}
-  IMAGE_TAG: ${{ github.sha }} # Define globally so all steps see it
+  IMAGE_TAG: ${{ github.sha }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
@@ -53,24 +52,28 @@ jobs:
         id: terraform_output
         working-directory: ./terraform
         run: |
-          # Use GITHUB_OUTPUT for modern best practices
           echo "ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
 
       - name: Deploy to EC2 via SSH
         uses: appleboy/ssh-action@master
         with:
           host: ${{ steps.terraform_output.outputs.ip }}
-          username: ec2-user # or 'ubuntu' depending on your AMI
+          username: ec2-user # Change to 'ubuntu' if using Ubuntu AMI
           key: ${{ secrets.EC2_SSH_KEY }}
+          # These must be listed here to be available inside the 'script' block
           envs: IMAGE_TAG,BACKEND_REPO,FRONTEND_REPO,AWS_REGION
           script: |
+            # 1. Login to ECR on the remote machine
             aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $BACKEND_REPO
             
+            # 2. Pull new images
             docker pull $BACKEND_REPO:$IMAGE_TAG
             docker pull $FRONTEND_REPO:$IMAGE_TAG
 
+            # 3. Clean up existing containers (prevents 'name already in use' errors)
             docker stop backend frontend || true
             docker rm backend frontend || true
 
+            # 4. Run new containers
             docker run -d --name backend -p 8000:8000 $BACKEND_REPO:$IMAGE_TAG
             docker run -d --name frontend -p 80:80 $FRONTEND_REPO:$IMAGE_TAG
